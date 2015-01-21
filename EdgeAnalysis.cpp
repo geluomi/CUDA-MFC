@@ -4,6 +4,8 @@
 #include "windows.h"
 cuda_converter  cudaconverter;            //新建一个CUDA类实例，便于调用CUDA函数
 cuda_converter  cudachaincode;               //两个不同的类对象分别对应十字模板并行和链码分析并行
+#define WIDTH      720
+#define HEIGHT     576
 const int Edgeanalysis::MaxQsize = 1024;
 
 
@@ -30,6 +32,7 @@ Edgeanalysis::~Edgeanalysis()
 }
 
 LONGLONG atime;
+LONGLONG gtime;
 //测试开始时间函数
 void starttime(LONGLONG* start)
 {
@@ -975,7 +978,8 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 {
 	int   k, i;
 	int   curvenumber;
-	double timeuse;
+	double timeuse_line;                 //十字模板算法计时
+	double timeuse_chain;                //链码算法计时
 	unsigned char *chain_img;
 	chain_img = (unsigned char *)malloc(sizeof(unsigned char)*w*h);   // 为每一个blob初始化的mask空间
 	std::vector<struct Element>::iterator iter;
@@ -1011,10 +1015,10 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 			/*cudaconverter.MallocMemA(size);
 			cudaconverter.TranslateInput(w, h, GrayImage);*/
 			cudaconverter.blackverkernel(w, h);
-			timeuse = stoptime(&atime, title);
 			memset(BlackVerEdger, 0, w*h);
 			memset(BlackHorEdger, 0, w*h);
 			cudaconverter.TranslateOutput(w, h, BlackVerEdger, BlackHorEdger);
+			timeuse_line = stoptime(&atime, title);
 			clear_blob(VerBlob, MAXBLOBNUMBER);
 			VerNumber = search_lineblob(BlackVerEdger, VerBlob, numthreshold);
 			clear_blob(HorBlob, MAXBLOBNUMBER);
@@ -1027,7 +1031,7 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 			memset(BlackHorEdge, 0, w*h);
 			Mark_BlackEdgever(GrayImage, BlackVerEdge, 2 * maxlinewidth + 1);
 			Mark_BlackEdgehor(GrayImage, BlackHorEdge, 2 * maxlinewidth + 1);
-			timeuse = stoptime(&atime, title);
+			timeuse_line = stoptime(&atime, title);
 			clear_blob(VerBlob, MAXBLOBNUMBER);
 			VerNumber = search_lineblob(BlackVerEdge, VerBlob, numthreshold);
 			clear_blob(HorBlob, MAXBLOBNUMBER);
@@ -1041,10 +1045,10 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 	{
 		if (gpuorcpu){
 			cudaconverter.whiteverkernel(w, h);
-			timeuse = stoptime(&atime, title);
 			memset(WhiteVerEdger, 0, w*h);
 			memset(WhiteHorEdger, 0, w*h);
 			cudaconverter.TranslateOutput(w, h, WhiteVerEdger, WhiteHorEdger);
+			timeuse_line = stoptime(&atime, title);
 			clear_blob(VerBlob, MAXBLOBNUMBER);
 			VerNumber = search_lineblob(WhiteVerEdger, VerBlob, numthreshold);
 			clear_blob(HorBlob, MAXBLOBNUMBER);
@@ -1058,7 +1062,7 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 			memset(WhiteHorEdge, 0, w*h);
 			Mark_WhiteEdgehor(GrayImage, WhiteHorEdge, 2 * maxlinewidth + 1);//_new
 			Mark_WhiteEdgever(GrayImage, WhiteVerEdge, 2 * maxlinewidth + 1);
-			timeuse = stoptime(&atime, title);
+			timeuse_line = stoptime(&atime, title);
 			clear_blob(HorBlob, MAXBLOBNUMBER);
 			HorNumber = search_lineblob(WhiteHorEdge, HorBlob, numthreshold);
 			clear_blob(VerBlob, MAXBLOBNUMBER);
@@ -1066,11 +1070,13 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 		}
 		cudaconverter.ReleaseMem();
 	}
-	
-	fprintf(fp_chain, "VerNumber HorNumber  %10d,%10d\n", VerNumber, HorNumber);
-	/*if (VerNumber){
+#if 0
+	starttime(&gtime);
+	cudachaincode.MallocMemM(w*h);
+	if (VerNumber)
+	{
 		int maxlinewidth;
-		int num = VerNumber;
+		int num = VerNumber;  
 		maxlinewidth = VerBlob[0].elements_number;
 
 		for (int i = 0; i < num; i++)
@@ -1078,158 +1084,118 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 			if (maxlinewidth < VerBlob[i].elements_number)
 			{
 				maxlinewidth = VerBlob[i].elements_number;
-				int tem = VerBlob[i].elements_number;
-				if (tem>195)
-				{
-					fprintf(fp_chain, "linewidth-number  %10d,%10d\n", tem,i);
-				}
 			}
 		}
-	fprintf(fp_chain, "maxlinewidth  %10d\n", maxlinewidth);
-	}*/
-	//cudachaincode.MallocMemM(w*h);
-	//starttime(&atime);
-	//if (VerNumber)
-	//{
-	//	int base = 268;
-	//	int circle = VerNumber / base;
-	//	for (int c = 0; c < (circle+1); c++){
-	//		int maxlinewidth;
-	//		int begin = c*base;//VerNumber;//=10
-	//		int end   = (c+1)*base;//VerNumber;
-	//		if (end>VerNumber)
-	//		{
-	//			end = VerNumber;
-	//		}
-	//		int num = end - begin;
-	//		maxlinewidth = VerBlob[begin].elements_number;
+		//unsigned char *h_ptr,
+		int *h_ptr, *chain_position;
+		h_ptr          = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));  //因为有left,right等结构体变量作为参数，所以没有必要也写进h_ptr中
+		memset(h_ptr,0,sizeof(int)*(2*maxlinewidth*num));
+		chain_position = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));
+		memset(chain_position, 0, sizeof(int)*(2 * maxlinewidth*num));
+		for (int k = 0; k < num; k++)        //将vector blob中的元素转移进二元数组ptr
+		{
+			
+			for (iter = VerBlob[k].elements.begin(); iter != VerBlob[k].elements.end(); iter++)
+			{
+				tmpElement = *iter;
+				int cn = iter - VerBlob[k].elements.begin();
+				int tempx = tmpElement.coord.x;
+				int tempy = tmpElement.coord.y;
+				//maskimage[tempy*m_width + tempx] = 1;
+				h_ptr[2 * (k*maxlinewidth + cn)]     = tempx;
+				h_ptr[2 * (k*maxlinewidth + cn) + 1] = tempy;   //将坐标值遍历写进ptr矩阵中
+				
+			}
+			
+		}
+		
+	
+		
+		cudachaincode.MallocMemP(2*maxlinewidth*num);             //初始化d_ptr
+		cudachaincode.TranslateInputB(maxlinewidth, num, h_ptr);
 
-	//		for (int i = 0; i < num; i++)
-	//		{
-	//			if (maxlinewidth < VerBlob[i + begin].elements_number)
-	//			{
-	//				maxlinewidth = VerBlob[i + begin].elements_number;
-	//			}
-	//		}
-	//		//fprintf(fp_chain, "maxlinewidth  %10d\n", maxlinewidth);
-	//		//unsigned char *h_ptr,
-	//		int *h_ptr, *chain_position;
-	//		h_ptr = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));  //因为有left,right等结构体变量作为参数，所以没有必要也写进h_ptr中
-	//		memset(h_ptr, 0, sizeof(int)*(2 * maxlinewidth*num));
-	//		chain_position = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));
-	//		memset(chain_position, 0, sizeof(int)*(2 * maxlinewidth*num));
-	//		for (int k = 0; k < num; k++)        //将vector blob中的元素转移进二元数组ptr
-	//		{
-
-	//			for (iter = VerBlob[k + begin].elements.begin(); iter != VerBlob[k + begin].elements.end(); iter++)
-	//			{
-	//				tmpElement = *iter;
-	//				int cn = iter - VerBlob[k + begin].elements.begin();
-	//				int tempx = tmpElement.coord.x;
-	//				int tempy = tmpElement.coord.y;
-	//				//maskimage[tempy*m_width + tempx] = 1;
-	//				h_ptr[2 * (k*maxlinewidth + cn)] = tempx;
-	//				h_ptr[2 * (k*maxlinewidth + cn) + 1] = tempy;   //将坐标值遍历写进ptr矩阵中
-
-	//			}
-
-	//		}
-
-
-
-	//		cudachaincode.MallocMemP(2 * maxlinewidth*num);             //初始化d_ptr
-	//		cudachaincode.TranslateInputB(maxlinewidth, num, h_ptr);
-
-
-	//		//链码分析函数
-	//		cudachaincode.chaincodekernel(maxlinewidth, num);
-	//		timeuse = stoptime(&atime, title);
-	//		fprintf(fp_chain, "gpu time-verblob:%f\n", timeuse);
-	//		//chaincode_comph(chain_img, left_bl, right_bl, bottom_bl, top_bl, maskimage);  //maskimage 直接作为输出结果图像，被循环填充（可叠加
-	//		cudachaincode.TranslateOutputP(maxlinewidth*num * 2, chain_position);
-	//		cudachaincode.ReleaseMemP();
-
-	//		/*for (int i = 0; i < num*maxlinewidth; i++)
-	//		{
-	//		if (chain_position[2*i]>0)
-	//		{
-	//		int x = chain_position[2*i];
-	//		int y = chain_position[2*i + 1];
-	//		fprintf(fp_chain, "chaincode-function-xy  %10d,%10d\n", x, y);
-
-	//		}
-	//		}*/
-	//		free(h_ptr);
-	//		free(chain_position);
-	//	}
-	//	//if (HorNumber)
-	//	//{
-	//	//	int maxlinewidth;
-	//	//	int num = HorNumber;
-	//	//	maxlinewidth = HorBlob[0].elements_number;
-
-	//	//	for (int i = 0; i < num; i++)
-	//	//	{
-	//	//		if (maxlinewidth < HorBlob[i].elements_number)
-	//	//		{
-	//	//			maxlinewidth = HorBlob[i].elements_number;
-	//	//		}
-	//	//	}
-	//	//	//unsigned char *h_ptr,
-	//	//	int *h2_ptr, *chain2_position;
-	//	//	h2_ptr = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));  //因为有left,right等结构体变量作为参数，所以没有必要也写进h_ptr中
-	//	//	memset(h2_ptr, 0, sizeof(int)*(2 * maxlinewidth*num));
-	//	//	chain2_position = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));
-	//	//	memset(chain2_position, 0, sizeof(int)*(2 * maxlinewidth*num));
-	//	//	for (int k = 0; k < num; k++)        //将vector blob中的元素转移进二元数组ptr
-	//	//	{
-
-	//	//		for (iter = HorBlob[k].elements.begin(); iter != HorBlob[k].elements.end(); iter++)
-	//	//		{
-	//	//			tmpElement = *iter;
-	//	//			int cn = iter - HorBlob[k].elements.begin();
-	//	//			int tempx = tmpElement.coord.x;
-	//	//			int tempy = tmpElement.coord.y;
-	//	//			//maskimage[tempy*m_width + tempx] = 1;
-	//	//			h2_ptr[2 * (k*maxlinewidth + cn)] = tempx;
-	//	//			h2_ptr[2 * (k*maxlinewidth + cn) + 1] = tempy;   //将坐标值遍历写进ptr矩阵中
-
-	//	//		}
-
-	//	//	}
-
-
-
-	//	//	cudachaincode.MallocMemH(2 * maxlinewidth*num);             //初始化d_ptr
-	//	//	cudachaincode.TranslateInputH(maxlinewidth, num, h2_ptr);
-
-
-	//	//	//链码分析函数
-	//	//	cudachaincode.chaincodehkernel(maxlinewidth, num);
-	//	//	//chaincode_comph(chain_img, left_bl, right_bl, bottom_bl, top_bl, maskimage);  //maskimage 直接作为输出结果图像，被循环填充（可叠加
-	//	//	cudachaincode.TranslateOutputH(maxlinewidth*num * 2, chain2_position);
-	//	//	cudachaincode.ReleaseMemH();
-
-	//	//	/*for (int i = 0; i < num*maxlinewidth; i++)
-	//	//	{
-	//	//	if (chain_position[2*i]>0)
-	//	//	{
-	//	//	int x = chain_position[2*i];
-	//	//	int y = chain_position[2*i + 1];
-	//	//	fprintf(fp_chain, "chaincode-function-xy  %10d,%10d\n", x, y);
-
-	//	//	}
-	//	//	}*/
-	//	//	free(h2_ptr);
-	//	//	free(chain2_position);
-	//	//}
-	//}
-	//
-	//	cudachaincode.TranslateOutputM(w*h, maskimage);
-	//	cudachaincode.ReleaseMemM();
-    starttime(&atime);
-	if (VerNumber)
+	
+			//链码分析函数
+	    cudachaincode.chaincodekernel(maxlinewidth,num);
+		
+		cudachaincode.TranslateOutputP(maxlinewidth*num*2,chain_position);
+		cudachaincode.ReleaseMemP();
+	
+		free(h_ptr);
+		free(chain_position);
+	}
+	timeuse_chain = stoptime(&gtime, title);
+#if 0
+	if (HorNumber)
 	{
+		int maxlinewidth;
+		int num = HorNumber;
+		maxlinewidth = HorBlob[0].elements_number;
+
+		for (int i = 0; i < num; i++)
+		{
+			if (maxlinewidth < HorBlob[i].elements_number)
+			{
+				maxlinewidth = HorBlob[i].elements_number;
+			}
+		}
+		//unsigned char *h_ptr,
+		int *h2_ptr, *chain2_position;
+		h2_ptr = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));  //因为有left,right等结构体变量作为参数，所以没有必要也写进h_ptr中
+		memset(h2_ptr, 0, sizeof(int)*(2 * maxlinewidth*num));
+		chain2_position = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));
+		memset(chain2_position, 0, sizeof(int)*(2 * maxlinewidth*num));
+		for (int k = 0; k < num; k++)        //将vector blob中的元素转移进二元数组ptr
+		{
+
+			for (iter = HorBlob[k].elements.begin(); iter != HorBlob[k].elements.end(); iter++)
+			{
+				tmpElement = *iter;
+				int cn = iter - HorBlob[k].elements.begin();
+				int tempx = tmpElement.coord.x;
+				int tempy = tmpElement.coord.y;
+				//maskimage[tempy*m_width + tempx] = 1;
+				h2_ptr[2 * (k*maxlinewidth + cn)] = tempx;
+				h2_ptr[2 * (k*maxlinewidth + cn) + 1] = tempy;   //将坐标值遍历写进ptr矩阵中
+
+			}
+
+		}
+
+
+
+		cudachaincode.MallocMemH(2 * maxlinewidth*num);             //初始化d_ptr
+		cudachaincode.TranslateInputH(maxlinewidth, num, h2_ptr);
+
+
+		//链码分析函数
+		cudachaincode.chaincodehkernel(maxlinewidth, num);
+		//chaincode_comph(chain_img, left_bl, right_bl, bottom_bl, top_bl, maskimage);  //maskimage 直接作为输出结果图像，被循环填充（可叠加
+		cudachaincode.TranslateOutputH(maxlinewidth*num * 2, chain2_position);
+		cudachaincode.ReleaseMemH();
+
+		/*for (int i = 0; i < num*maxlinewidth; i++)
+		{
+		if (chain_position[2*i]>0)
+		{
+		int x = chain_position[2*i];
+		int y = chain_position[2*i + 1];
+		fprintf(fp_chain, "chaincode-function-xy  %10d,%10d\n", x, y);
+
+		}
+		}*/
+		free(h2_ptr);
+		free(chain2_position);
+	}
+#endif
+	cudachaincode.TranslateOutputM(w*h,maskimage);
+	cudachaincode.ReleaseMemM();
+#endif
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////vector cpu端函数
+#if 0
+    starttime(&gtime);
+    if (VerNumber)
+	  {
 		memset(chain_img, 0, sizeof(unsigned char)*w*h);                      //chain_img已被使用过一次，第二次使用前要确保都为空值
 		for (k = 0; k < VerNumber; k++)
 		{
@@ -1259,57 +1225,113 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 
 		}
 	}
-	timeuse = stoptime(&atime, title);
-	fprintf(fp_chain, "cpu time-verblob:%f\n", timeuse);
-	//if (HorNumber)
-	//{
-	//	memset(chain_img, 0, sizeof(unsigned char)*w*h);                      //chain_img已被使用过一次，第二次使用前要确保都为空值
-	//	for (k = 0; k < HorNumber; k++)
-	//	{
-	//		/*CopyBlob(&VerBlob[k], &TempBlob[TempNumber], TempNumber);
-	//		TempNumber++;*/
-	//		for (iter = HorBlob[k].elements.begin(); iter != HorBlob[k].elements.end(); iter++)
-	//		{
-	//			tmpElement = *iter;
+	timeuse_chain = stoptime(&gtime, title);
+#if 0
+	if (HorNumber)
+	{
+		memset(chain_img, 0, sizeof(unsigned char)*w*h);                      //chain_img已被使用过一次，第二次使用前要确保都为空值
+		for (k = 0; k < HorNumber; k++)
+		{
+			/*CopyBlob(&VerBlob[k], &TempBlob[TempNumber], TempNumber);
+			TempNumber++;*/
+			for (iter = HorBlob[k].elements.begin(); iter != HorBlob[k].elements.end(); iter++)
+			{
+				tmpElement = *iter;
 
-	//			int tempx = tmpElement.coord.x;
-	//			int tempy = tmpElement.coord.y;
-	//			chain_img[tempy*m_width + tempx] = 1;//chain_img[tempy*m_width + tempx] = 1;
-	//		}
-	//		bottom_bl.x = HorBlob[k].bottomx;
-	//		bottom_bl.y = HorBlob[k].bottomy;
+				int tempx = tmpElement.coord.x;
+				int tempy = tmpElement.coord.y;
+				chain_img[tempy*m_width + tempx] = 1;//chain_img[tempy*m_width + tempx] = 1;
+			}
+			bottom_bl.x = HorBlob[k].bottomx;
+			bottom_bl.y = HorBlob[k].bottomy;
 
-	//		left_bl.x = HorBlob[k].leftx;
-	//		left_bl.y = HorBlob[k].lefty;
+			left_bl.x = HorBlob[k].leftx;
+			left_bl.y = HorBlob[k].lefty;
 
-	//		top_bl.x = HorBlob[k].topx;
-	//		top_bl.y = HorBlob[k].topy;
+			top_bl.x = HorBlob[k].topx;
+			top_bl.y = HorBlob[k].topy;
 
-	//		right_bl.x = HorBlob[k].rightx;
-	//		right_bl.y = HorBlob[k].righty;
-	//		//链码分析函数
-	//		chaincode_comph(chain_img, left_bl, right_bl, bottom_bl, top_bl, maskimage);  //maskimage 直接作为输出结果图像
+			right_bl.x = HorBlob[k].rightx;
+			right_bl.y = HorBlob[k].righty;
+			//链码分析函数
+			chaincode_comph(chain_img, left_bl, right_bl, bottom_bl, top_bl, maskimage);  //maskimage 直接作为输出结果图像
 
-	//	}
-	//}
+		}
+	}
+#endif
+	///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	for (int j=0;j<TempNumber;j++)
+	{
+		CopyBlob(&TempBlob[j],&CurveBlob[curvenumber],curvenumber);
+		for (iter=CurveBlob[curvenumber].elements.begin();iter!=CurveBlob[curvenumber].elements.end();iter++)
+		{
+			tmpElement=*iter;
+			int tempx=tmpElement.coord.x;
+			int tempy=tmpElement.coord.y;
+			//maskimage[tempy*m_width+tempx]=1;
+		}
+		curvenumber++;
+	}
+	return curvenumber;
+#endif
+//////////////////////////////////////////链码GPU算法的CPU验证 要为新增的实参*chaincode分配存储空间？目前先验证水平线的链码算法
+#if 1
+	starttime(&gtime);                                     //同时if 1同一函数的两个版本时，有些内部变量（h_ptr,chain_position）会因为名字相同在释放内存的时候会产生冲突
+	if (VerNumber)
+	{
+		int maxlinewidth;
+		int num = VerNumber;
+		maxlinewidth = VerBlob[0].elements_number;
+
+		for (int i = 0; i < num; i++)
+		{
+			if (maxlinewidth < VerBlob[i].elements_number)
+			{
+				maxlinewidth = VerBlob[i].elements_number;
+			}
+		}
+		//unsigned char *h_ptr,
+		int *h2_ptr, *chain2_position;
+		unsigned char *chain2_code;
+		h2_ptr = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));  //因为有left,right等结构体变量作为参数，所以没有必要也写进h_ptr中
+		memset(h2_ptr, 0, sizeof(int)*(2 * maxlinewidth*num));
+		chain2_position = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));        //几个中间存储区和GPU类似，没必要更改
+		memset(chain2_position, 0, sizeof(int)*(2 * maxlinewidth*num));
+		chain2_code = (unsigned char*)malloc((maxlinewidth*num*sizeof(unsigned char)));        //方向占的存储空间只为坐标的一半
+		memset(chain2_code, 0, sizeof(unsigned char)*(maxlinewidth*num));
+		for (int k = 0; k < num; k++)        //将vector blob中的元素转移进二元数组ptr
+		{
+
+			for (iter = VerBlob[k].elements.begin(); iter != VerBlob[k].elements.end(); iter++)
+			{
+				tmpElement = *iter;
+				int cn = iter - VerBlob[k].elements.begin();
+				int tempx = tmpElement.coord.x;
+				int tempy = tmpElement.coord.y;
+				//maskimage[tempy*m_width + tempx] = 1;
+				h2_ptr[2 * (k*maxlinewidth + cn)] = tempx;
+				h2_ptr[2 * (k*maxlinewidth + cn) + 1] = tempy;   //将坐标值遍历写进ptr矩阵中
+
+			}
+
+		}
+		/////////////////////////输入参数对应 maxlinewidth:w,num:h,h_ptr:blobmask
+		chaincode_compcu(h2_ptr,maskimage,chain2_code,chain2_position,maxlinewidth,num);
+
+		free(h2_ptr);
+		free(chain2_code);
+		free(chain2_position);
+	}
+	timeuse_chain = stoptime(&gtime, title);
+#endif
 
 
-	//for (int j=0;j<TempNumber;j++)
-	//{
-	//	CopyBlob(&TempBlob[j],&CurveBlob[curvenumber],curvenumber);
-	//	for (iter=CurveBlob[curvenumber].elements.begin();iter!=CurveBlob[curvenumber].elements.end();iter++)
-	//	{
-	//		tmpElement=*iter;
-	//		int tempx=tmpElement.coord.x;
-	//		int tempy=tmpElement.coord.y;
-	//		//maskimage[tempy*m_width+tempx]=1;
-	//	}
-	//	curvenumber++;
-	//}
-	//return curvenumber;
+///////////////////////////////////////////////////////////////////////////////////////
+
 	free(chain_img);
 	fclose(fp_chain);
-	return VerNumber;//timeuse;
+	return timeuse_chain;//timeuse;
 }
 
 
@@ -2238,6 +2260,509 @@ int Edgeanalysis::chaincode_comph(unsigned char *chainmask, Coord left, Coord ri
 	delete antichainmask1;
 
 	return retflag;
+
+
+
+
+
+
+}
+
+
+int Edgeanalysis::chaincode_compcu(int *blobmask, unsigned char *maskimage, unsigned char *chaincode,int *chainposition, int w, int h)           //使用数组形式的链码排序函数
+{
+	for (int n = 0; n < h;n++){                                         //最外层的循环相当于遍历blobmask的每一行
+		bool burrflag = false;
+		//chain code analysis	
+		unsigned char clock[8][2] = { { 1, 0 }, { 1, -1 }, { 1, -1 }, { 1, -1 }, { 1, -1 }, { -1, 1 }, { 0, 1 }, { 1, 1 } };           //跳过2，3，4方向，避免搜索原路返回
+		unsigned char anticlock[8][2] = { { 1, 0 }, { 1, 1 }, { 0, 1 }, { -1, 1 }, { -1, 0 }, { -1, -1 }, { 0, -1 }, { 1, -1 } };
+		unsigned char anticlock1[8][2] = { { -1, 0 }, { -1, 1 }, { 0, 1 }, { 1, 1 }, { 1, 0 }, { 1, -1 }, { 0, -1 }, { -1, -1 } };
+		//重排序后的blobmask，startx和starty在起点处，按x为主序排列（符合8邻域内的x的条件 差为1，-1，0）
+
+		//链表跟踪值会超出寄存器容量吗？
+		//如果可以直接new分配存储空间的话，全零初始化显得没有必要，因为有自带的计数器
+		unsigned char *clockcode = new unsigned char[w];             //用chaincode和clockcode两个存储空间来比较3个方向并将结果输出到chaincode（不合适，其他线程也会对这个chaincode进行写操作，会出错，还是先检查BUG，以及归类大BLOB和小BLOB比较合适）
+		unsigned char *anticlockcode = new unsigned char[w];          //不基于图像的搜索（循环遍历）很繁琐，可以考虑在后期加上预先的搜索函数（双循环，找当前坐标的下一个相邻坐标）
+		unsigned char *anticlockcode1 = new unsigned char[w];
+		int *tempmask = new int[2 * w];
+		int *antichainmask = new int[2 * w];
+		int *antichainmask1 = new int[2 * w];
+
+
+		//这里chainposition因为是作为输出变量，不是函数内变量，所以不用new初始化，直接写入数据即可，而记录方向的clockcode等变量是为了后续的比较长度等等
+		// 对应CPU版本中的vector模型，使用thrust库来对应，希望接口不会出问题,因为对应每一个blob，直接移到执行函数内部,因为thrust和fprintf一样是host函数，所以此处用不了
+
+		//因为CPU中用到了vector向量，所以不急着实施，先看看输出图像效果怎样（链表分析函数是否顺利运行）
+		int rx, ry, lx, ly, tx, ty, bx, by;  //分别储存四个坐标（八个数值）
+		int startx, starty, endx, endy;            //把所以涉及坐标的变量都变成short类型，不然会导致int转换到short时的精度缺失
+		int *blobmaskcu            = NULL;
+		int *chainpositioncu       = NULL;
+		unsigned char *chaincodecu = NULL;
+		blobmaskcu = &blobmask[2*n*w];                        //三个数据结构，一个输入，两个输出，分别对应每一行的行首
+		chainpositioncu = &chainposition[2*n*w];
+		chaincodecu = &chaincode[n*w];
+		rx = lx = tx = bx = blobmaskcu[0];            //每一行一共有2w个元素（x,y坐标），所以坐标后缀应为2*n*w
+		ry = ly = ty = by = blobmaskcu[1];
+		for (int i = 0; i < w; i++)
+		{
+			if ((blobmaskcu[2 * i] > 0) && (blobmaskcu[2 * i + 1] > 0)){
+				if (blobmaskcu[2 * i] > rx)
+				{
+					rx = blobmaskcu[2 * i];
+					ry = blobmaskcu[2 * i + 1];
+				}
+				if (blobmaskcu[2 * i] < lx)
+				{
+					lx = blobmaskcu[2 * i];
+					ly = blobmaskcu[2 * i + 1];
+				}
+				if (blobmaskcu[2 * i + 1] > ty)
+				{
+					tx = blobmaskcu[2 * i];
+					ty = blobmaskcu[2 * i + 1];
+				}
+				if (blobmaskcu[2 * i + 1] < by)
+				{
+					bx = blobmaskcu[2 * i];
+					by = blobmaskcu[2 * i + 1];
+				}
+			}
+		}
+		if (rx - lx >= ty - by)
+		{
+			startx = lx;
+			starty = ly;
+			endx = rx;
+			endy = ry;
+		}
+		else
+		{
+			startx = bx;
+			starty = by;
+			endx = tx;
+			endy = ty;
+		}
+
+		if (lx == WIDTH || ty == HEIGHT)
+		{
+			startx = 0;
+			starty = 0;
+			endx = 0;
+			endy = 0;
+			return -1;
+		}
+		/*tempmask[0] = startx;
+		tempmask[1] = starty;*/
+
+		//c:对应于每一行的blob的实际长度
+		//默认前提：i=w-1，m=w-2时，最大blob的终点（blobmask[2*i]）在次点的邻域内（被包含进去）
+		int c = 0;
+		for (int m = 0; m < w; m++){
+			if (blobmaskcu[2 * m] > 0){
+				int mx = (blobmaskcu[2 * m]);
+				int my = (blobmaskcu[2 * m + 1]);//作为被比较的点也得放进tempmask数组中
+				tempmask[2 * c]     = mx;
+				tempmask[2 * c + 1] = my;
+				/*int x = tempmask[2 * c];
+				int y = tempmask[2 * c + 1];
+				maskimage[y*WIDTH + x] = 1;*/
+				c++;
+			}
+		}
+
+		//因为退出循环前c还加了一次，所以c应该代表的是元素个数
+		for (int p = 0; p < c; p++)
+		{
+
+			int x = tempmask[2 * p];
+			int y = tempmask[2 * p + 1];
+			antichainmask[2 * p]  = x;
+			antichainmask1[2 * p] = x;
+			antichainmask[2 * p + 1]  = y;
+			antichainmask1[2 * p + 1] = y;
+			//maskimage[y*WIDTH + x] = 1;
+
+		}
+
+		int count, anticount, antcount;     //相当于clock.size()记数
+		int curx, cury;                    //记录目前搜索的坐标位置
+		//初始链码
+		/*clockstart.x = start.x;
+		clockstart.y = start.y;*/
+		if (rx - lx >= ty - by)
+		{
+			startx = lx;
+			starty = ly;
+			endx = rx;
+			endy = ry;
+		}
+		else
+		{
+			startx = bx;
+			starty = by;
+			endx = tx;
+			endy = ty;
+		}
+
+		if (lx == WIDTH || ty == HEIGHT)
+		{
+			startx = 0;
+			starty = 0;
+			endx = 0;
+			endy = 0;
+			return -1;
+		}
+		for (int i = 0; i < c; i++){
+			if ((tempmask[2 * i] == startx) && (tempmask[2 * i + 1] == starty)){
+				//maskimage[y*WIDTH + x] = 1;
+				tempmask[2 * i] = 0;
+				tempmask[2 * i + 1] = 0;   //开头的两个都得赋值为0
+				break;
+			}
+		}
+		clockcode[0] = 0;
+		count = 1;
+
+		for (int q = 0; q < c; q++)         //搜索到的点个数肯定小于c,用最外层的for循环来取代可能造成死循环的do-while结构
+		{
+			if (burrflag == false){
+				for (int k = 0; k < 8; k++)
+				{
+					burrflag = false;
+					curx = startx + clock[k][0];                   //ushort和uchar之间的加法不需要强制类型转换?根据产生的结果来判断是否需要强制转换
+					cury = starty + clock[k][1];
+					if ((curx > -1) && (curx < WIDTH) && (cury > -1) && (cury < HEIGHT))
+					{
+						for (int i = 0; i < c; i++)
+						{
+							if ((tempmask[2 * i] == curx) && (tempmask[2 * i + 1] == cury))
+							{
+								//maskimage[cury*WIDTH + curx] = 1;       //直接测试第一个函数是否能成功
+								tempmask[2 * i] = tempmask[2 * i + 1] = 0;
+								clockcode[count] = k;
+								count++;
+								startx = curx;
+								starty = cury;
+								burrflag = true;
+								goto verify;           //break只能跳出最内层的循环，而break总是与if成对出现，来跳出循环
+							}
+						}
+
+					}
+				}
+			verify:
+				if (burrflag)
+				{
+					int distx = abs(startx - endx);           //不同类型的变量转换很繁琐
+					int disty = abs(starty - endy);
+
+					if (distx < 1 && disty < 1)      //(StartP.x == right.x) && (StartP.y == right.y)
+						burrflag = true;
+					else
+						burrflag = false;
+				}
+				else
+					burrflag = true;
+			}
+		}
+		//while (burrflag == false);
+		//clockdist = sqrtf((clockstart.x - start.x)*(clockstart.x - start.x) + (clockstart.y - start.y)*(clockstart.y - start.y));
+
+		//step2:逆时针方向搜索链码
+
+		if (rx - lx >= ty - by)
+		{
+			startx = lx;
+			starty = ly;
+			endx = rx;
+			endy = ry;
+		}
+		else
+		{
+			startx = bx;
+			starty = by;
+			endx = tx;
+			endy = ty;
+		}
+
+		if (lx == WIDTH || ty == HEIGHT)
+		{
+			startx = 0;
+			starty = 0;
+			endx = 0;
+			endy = 0;
+			return -1;
+		}
+		///*anticlockstart.x = start.x;
+		//anticlockstart.y = start.y;*/
+		//三个搜索函数必须注意三个变量 clockcode,count,tempmask分别对应改变
+		for (int i = 0; i < c; i++){
+			if ((antichainmask[2 * i] == startx) && (antichainmask[2 * i + 1] == starty)){
+				antichainmask[2 * i] = 0;
+				antichainmask[2 * i + 1] = 0;   //开头的两个都得赋值为0
+				break;
+			}
+		}
+		anticlockcode[0] = 0;
+		anticount = 1;
+		burrflag = false;
+		for (int q = 0; q < c; q++)         //搜索到的点个数肯定小于c,用最外层的for循环来取代可能造成死循环的do-while结构
+		{
+			if (burrflag == false){
+				for (int k = 0; k < 8; k++)
+				{
+					burrflag = false;
+					curx = startx + anticlock[k][0];
+					cury = starty + anticlock[k][1];
+					if ((curx > -1) && (curx < WIDTH) && (cury > -1) && (cury < HEIGHT))
+					{
+						for (int i = 0; i < c; i++)
+						{
+							if ((antichainmask[2 * i] == curx) && (antichainmask[2 * i + 1] == cury))
+							{
+								//maskimage[cury*WIDTH + curx] = 1;       //直接测试第一个函数是否能成功
+								antichainmask[2 * i] = antichainmask[2 * i + 1] = 0;
+								anticlockcode[anticount] = k;
+								anticount++;
+								startx = curx;
+								starty = cury;
+								burrflag = true;
+								goto antiverify;           //break只能跳出最内层的循环，而break总是与if成对出现，来跳出循环
+							}
+						}
+
+					}
+				}
+			antiverify:
+				if (burrflag)
+				{
+					int distx = abs(startx - endx);
+					int disty = abs(starty - endy);
+
+					if (distx < 1 && disty < 1)      //(StartP.x == right.x) && (StartP.y == right.y)
+						burrflag = true;
+					else
+						burrflag = false;
+				}
+				else
+					burrflag = true;
+			}
+		}
+
+		//} while (burrflag == false);
+		////anticlockdist = sqrtf((anticlockstart.x - start.x)*(anticlockstart.x - start.x) + (anticlockstart.y - start.y)*(anticlockstart.y - start.y));
+
+		////step3:延迟方向搜索链码
+
+		if (rx - lx >= ty - by)
+		{
+			startx = lx;
+			starty = ly;
+			endx = rx;
+			endy = ry;
+		}
+		else
+		{
+			startx = bx;
+			starty = by;
+			endx = tx;
+			endy = ty;
+		}
+
+		if (lx == WIDTH || ty == HEIGHT)
+		{
+			startx = 0;
+			starty = 0;
+			endx = 0;
+			endy = 0;
+			return -1;
+		}
+		///*anticlockstart1.x = start.x;
+		//anticlockstart1.y = start.y;*/
+
+		//antichainmask1[0] = 0;
+		//antichainmask1[1] = 0;
+		//anticlockcode1[0] = 0;
+		//antcount = 1;
+		for (int i = 0; i < c; i++){
+			if ((antichainmask1[2 * i] == startx) && (antichainmask1[2 * i + 1] == starty)){
+				antichainmask1[2 * i] = 0;
+				antichainmask1[2 * i + 1] = 0;   //开头的两个都得赋值为0
+				break;
+			}
+		}
+		anticlockcode1[0] = 0;
+		antcount = 1;
+		burrflag = false;
+		for (int q = 0; q < c; q++)         //搜索到的点个数肯定小于c,用最外层的for循环来取代可能造成死循环的do-while结构
+		{
+			if (burrflag == false){
+				for (int k = 0; k < 8; k++)
+				{
+					burrflag = false;
+					curx = startx + anticlock1[k][0];
+					cury = starty + anticlock1[k][1];
+					if ((curx > -1) && (curx < WIDTH) && (cury > -1) && (cury < HEIGHT))
+					{
+						for (int i = 0; i < c; i++)
+						{
+							if ((antichainmask1[2 * i] == curx) && (antichainmask1[2 * i + 1] == cury))
+							{
+								//maskimage[cury*WIDTH + curx] = 1;       //直接测试第一个函数是否能成功
+								antichainmask1[2 * i] = antichainmask1[2 * i + 1] = 0;
+								anticlockcode1[antcount] = k;
+								antcount++;
+								startx = curx;
+								starty = cury;
+								burrflag = true;
+								goto antverify;           //break只能跳出最内层的循环，而break总是与if成对出现，来跳出循环
+							}
+						}
+
+					}
+				}
+			antverify:
+				if (burrflag)
+				{
+					int distx = abs(startx - endx);
+					int disty = abs(starty - endy);
+
+					if (distx < 1 && disty < 1)      //(StartP.x == right.x) && (StartP.y == right.y)
+						burrflag = true;
+					else
+						burrflag = false;
+				}
+				else
+					burrflag = true;
+			}
+		}
+
+
+		//} while (burrflag == false);
+		//anticlockdist1 = sqrtf((anticlockstart1.x - start.x)*(anticlockstart1.x - start.x) + (anticlockstart1.y - start.y)*(anticlockstart1.y - start.y));
+
+		//step4:判决最优链码
+		int retflag = 1;
+		//int clocksize = clockcode.size();	//所有标准库对应的函数都能在thrust中使用？重载是个好东西
+		//int anticlocksize = anticlockcode.size();
+		//int anticlocksize1 = anticlockcode1.size();
+
+		//fprintf(fp_chain, "chaincode-algorithm-xy  %10d, %10d, %10d, %3.3f\n", clocksize, anticlocksize, anticlocksize1);
+		if (rx - lx >= ty - by)
+		{
+			startx = lx;
+			starty = ly;
+			endx = rx;
+			endy = ry;
+		}
+		else
+		{
+			startx = bx;
+			starty = by;
+			endx = tx;
+			endy = ty;
+		}
+
+		if (lx == WIDTH || ty == HEIGHT)
+		{
+			startx = 0;
+			starty = 0;
+			endx = 0;
+			endy = 0;
+			return -1;
+		}
+		maskimage[(starty)*WIDTH + (startx)] = 1;                //直接通过反坐标系转换映射到大图maskimage中，而不是对应每个blob的小图temp
+		chainpositioncu[0] = startx;                               //short转换为int不需要强制类型转换
+		chainpositioncu[1] = starty;
+		//不用将起点的坐标写入chainposition吗？
+		if (count >= anticount)
+		{
+
+
+
+
+			if (count >= antcount)
+			{
+				retflag = 1;
+				for (int k = 0; k < count; k++)
+				{
+					int jj = clockcode[k];  //at()有边界检查，而operator没有，有边界溢出可能
+					chaincodecu[k] = jj;
+					startx = startx + clock[jj][0];
+					starty = starty + clock[jj][1];
+					chainpositioncu[2 * (k + 1) + 0] = startx;
+					chainpositioncu[2 * (k + 1) + 1] = starty;
+					maskimage[(starty)*WIDTH + (startx)] = 1;
+					//fprintf(fp_chain, "chaincode-function-xy  %10d,%10d, %10d\n", start.x, start.y, jj);
+				}
+			}
+			else
+			{
+				retflag = 2;
+				for (int k = 0; k < antcount; k++)
+				{
+					int jj = anticlockcode1[k];
+					chaincodecu[k] = jj;
+					startx = startx + anticlock1[jj][0];
+					starty = starty + anticlock1[jj][1];
+					//chainposition.push_back(start);
+					maskimage[(starty)*WIDTH + (startx)] = 2;
+					chainpositioncu[2 * (k + 1) + 0] = startx;
+					chainpositioncu[2 * (k + 1) + 1] = starty;
+				}
+			}
+		}
+		else
+		{
+			if (anticount >= antcount)
+			{
+				retflag = 0;
+				for (int k = 0; k < anticount; k++)
+				{
+					int jj = anticlockcode[k];
+					chaincodecu[k] = jj;
+					startx = startx + anticlock[jj][0];
+					starty = starty + anticlock[jj][1];
+					//chainposition.push_back(start);
+					maskimage[(starty)*WIDTH + (startx)] = 3;
+					chainpositioncu[2 * (k + 1) + 0] = startx;
+					chainpositioncu[2 * (k + 1) + 1] = starty;
+				}
+			}
+			else
+			{
+				retflag = 2;
+				for (int k = 0; k < antcount; k++)
+				{
+					int jj = anticlockcode1[k];
+					chaincodecu[k] = jj;
+					startx = startx + anticlock1[jj][0];
+					starty = starty + anticlock1[jj][1];
+					//chainposition.push_back(start);
+					maskimage[(starty)*WIDTH + (startx)] = 2;
+					chainpositioncu[2 * (k + 1) + 0] = startx;
+					chainpositioncu[2 * (k + 1) + 1] = starty;
+				}
+			}
+		}
+
+		/*clockcode.clear();
+		anticlockcode.clear();
+		anticlockcode1.clear();
+		chaincode.clear();
+		chainposition.clear();*/
+		delete tempmask;
+		delete antichainmask;
+		delete antichainmask1;
+		delete clockcode;
+		delete anticlockcode;
+		delete anticlockcode1;
+		//delete chaincode;        //如果要观察chaincode的话，应当copy保存至一个数组中输出，以便后续传到host端
+		return retflag;
+
+	}
+
+
 
 
 
