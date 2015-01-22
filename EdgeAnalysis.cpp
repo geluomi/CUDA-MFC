@@ -1070,20 +1070,20 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 		}
 		cudaconverter.ReleaseMem();
 	}
-#if 0
+#if 1
 	starttime(&gtime);
 	cudachaincode.MallocMemM(w*h);
 	if (VerNumber)
 	{
-		int maxlinewidth;
-		int num = VerNumber;  
-		maxlinewidth = VerBlob[0].elements_number;
+		int maxlinewidth =100;
+		int num = 0;
 
-		for (int i = 0; i < num; i++)
+		for (int i = 0; i < VerNumber; i++)
 		{
-			if (maxlinewidth < VerBlob[i].elements_number)
+			int len = VerBlob[i].elements_number;
+			if (len<100)
 			{
-				maxlinewidth = VerBlob[i].elements_number;
+				++num;
 			}
 		}
 		//unsigned char *h_ptr,
@@ -1092,19 +1092,22 @@ double Edgeanalysis::Bottom_Perceptual(unsigned char *GrayImage, LineAttributeBl
 		memset(h_ptr,0,sizeof(int)*(2*maxlinewidth*num));
 		chain_position = (int*)malloc((2 * maxlinewidth * num*sizeof(int)));
 		memset(chain_position, 0, sizeof(int)*(2 * maxlinewidth*num));
-		for (int k = 0; k < num; k++)        //将vector blob中的元素转移进二元数组ptr
+		int kn = 0;        //kn代表h_ptr的行索引，因为长度满足条件的blob的索引和行索引不一致，所以需要另外的自动记数变量kn
+		for (int k = 0; k < VerNumber; k++)        //将vector blob中的元素转移进二元数组ptr
 		{
-			
-			for (iter = VerBlob[k].elements.begin(); iter != VerBlob[k].elements.end(); iter++)
-			{
-				tmpElement = *iter;
-				int cn = iter - VerBlob[k].elements.begin();
-				int tempx = tmpElement.coord.x;
-				int tempy = tmpElement.coord.y;
-				//maskimage[tempy*m_width + tempx] = 1;
-				h_ptr[2 * (k*maxlinewidth + cn)]     = tempx;
-				h_ptr[2 * (k*maxlinewidth + cn) + 1] = tempy;   //将坐标值遍历写进ptr矩阵中
-				
+			if (VerBlob[k].elements_number<100){
+				++kn;
+				for (iter = VerBlob[k].elements.begin(); iter != VerBlob[k].elements.end(); iter++)
+				{
+					tmpElement = *iter;
+					int cn = iter - VerBlob[k].elements.begin();
+					int tempx = tmpElement.coord.x;
+					int tempy = tmpElement.coord.y;
+					//maskimage[tempy*m_width + tempx] = 1;
+					h_ptr[2 * (kn*maxlinewidth + cn)] = tempx;
+					h_ptr[2 * (kn*maxlinewidth + cn) + 1] = tempy;   //将坐标值遍历写进ptr矩阵中
+
+				}
 			}
 			
 		}
